@@ -106,16 +106,34 @@ def custom_sdpa_with_start_pos_forward(
         else:
             start_pos = 0
 
-    output = torch.ops.llama.custom_sdpa(
-        query,
-        key,
-        value,
-        start_pos=start_pos,
-        attn_mask=attn_mask,
-        drpout_p=0.0,
-        is_causal=is_causal,
-        scale=scaling,
-    )
+    # Try the input dtype natively. ExecuTorch's custom_sdpa only gained
+    # f16/bf16 support in 1.4; older versions assert float32. Rather than
+    # sniff the version, we attempt the native call and fall back to an fp32
+    # upcast if the op rejects a half dtype.
+    try:
+        output = torch.ops.llama.custom_sdpa(
+            query,
+            key,
+            value,
+            start_pos=start_pos,
+            attn_mask=attn_mask,
+            drpout_p=0.0,
+            is_causal=is_causal,
+            scale=scaling,
+        )
+    except AssertionError as error:
+        if input_dtype not in (torch.float16, torch.bfloat16) or "float32" not in str(error):
+            raise
+        output = torch.ops.llama.custom_sdpa(
+            query.to(torch.float32),
+            key.to(torch.float32),
+            value.to(torch.float32),
+            start_pos=start_pos,
+            attn_mask=attn_mask,
+            drpout_p=0.0,
+            is_causal=is_causal,
+            scale=scaling,
+        )
     return output.to(input_dtype), None
 
 

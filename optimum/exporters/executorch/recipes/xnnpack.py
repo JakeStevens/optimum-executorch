@@ -15,6 +15,7 @@
 import logging
 from typing import Dict, Union
 
+import torch
 from packaging.version import parse
 from tabulate import tabulate
 from torch import __version__ as torch_version
@@ -83,9 +84,17 @@ def export_to_executorch_with_xnnpack(
         if len(exported_programs) == 1:
             exported_programs = {"forward": next(iter(exported_programs.values()))}
 
+        # bf16 delegation is opt-in in the backend. A bf16 model always carries bf16 tensors
+        # (e.g. RMSNorm weights), even when its linears are quantized.
+        enable_bf16 = any(
+            getattr(tensor, "dtype", None) == torch.bfloat16
+            for exported_program in exported_programs.values()
+            for tensor in exported_program.state_dict.values()
+        )
+
         et_prog = to_edge_transform_and_lower(
             exported_programs,
-            partitioner=[XnnpackPartitioner()],
+            partitioner=[XnnpackPartitioner(enable_bf16=enable_bf16)],
             compile_config=EdgeCompileConfig(
                 _check_ir_validity=False,
                 _skip_dim_order=True,

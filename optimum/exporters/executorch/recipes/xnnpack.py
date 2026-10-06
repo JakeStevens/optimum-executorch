@@ -32,6 +32,7 @@ from executorch.exir import (
     ExecutorchProgram,
     to_edge_transform_and_lower,
 )
+from executorch.exir.dialects._ops import ops
 from executorch.exir.passes import MemoryPlanningPass
 from optimum.executorch.passes.remove_padding_idx_embedding_pass import RemovePaddingIdxEmbeddingPass
 
@@ -64,6 +65,17 @@ def _xnnpack_honors_enable_bf16() -> bool:
     except Exception:  # Partitioner internals differ across versions; assume unsupported.
         return False
     return any(getattr(config, "enable_bf16", False) for config in configs)
+
+
+def _has_accumulating_index_put(program: ExportedProgram) -> bool:
+    """The portable index_put_ kernel cannot handle accumulate=True."""
+    for node in program.graph.nodes:
+        if node.op != "call_function" or node.target != ops.edge.aten.index_put.default:
+            continue
+        accumulate = node.kwargs.get("accumulate", node.args[3] if len(node.args) > 3 else False)
+        if accumulate is not False:
+            return True
+    return False
 
 
 @register_recipe("xnnpack")
@@ -151,6 +163,13 @@ def export_to_executorch_with_xnnpack(
             constant_methods=metadata,
             transform_passes=[RemovePaddingIdxEmbeddingPass()],
         )
+        if run_reinplace_pass and any(
+            _has_accumulating_index_put(et_prog.exported_program(method)) for method in et_prog.methods
+        ):
+            # Reinplacing any of these nodes would fail at runtime. The pass is
+            # configured per export, so keep the whole program functional.
+            backend_config_dict["run_reinplace_pass"] = False
+            logging.warning("Skipping re-inplace: index_put with accumulate=True is not supported in-place")
         et_prog = et_prog.to_executorch(
             config=ExecutorchBackendConfig(**backend_config_dict),
         )
